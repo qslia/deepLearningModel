@@ -7,7 +7,6 @@ import os
 import sys
 import subprocess
 import torch
-from pathlib import Path
 
 
 def find_visual_studio():
@@ -53,6 +52,32 @@ def find_msvc_compiler(vs_path):
     return None
 
 
+def find_windows_sdk():
+    """Find Windows SDK installation"""
+    possible_paths = [
+        r"C:\Program Files (x86)\Windows Kits\10",
+        r"C:\Program Files\Windows Kits\10",
+    ]
+
+    for base_path in possible_paths:
+        if os.path.exists(base_path):
+            lib_path = os.path.join(base_path, "Lib")
+            if os.path.exists(lib_path):
+                # Find the latest SDK version
+                versions = [
+                    d
+                    for d in os.listdir(lib_path)
+                    if (
+                        os.path.isdir(os.path.join(lib_path, d)) and d.startswith("10.")
+                    )
+                ]
+                if versions:
+                    latest_version = sorted(versions)[-1]
+                    sdk_lib_path = os.path.join(lib_path, latest_version)
+                    return sdk_lib_path
+    return None
+
+
 def setup_environment():
     """Setup environment variables for CUDA compilation"""
     print("Setting up CUDA compilation environment...")
@@ -61,7 +86,8 @@ def setup_environment():
     vs_path = find_visual_studio()
     if not vs_path:
         print("❌ Visual Studio not found!")
-        print("Please install Visual Studio 2019 or 2022 with C++ build tools.")
+        msg = "Please install Visual Studio 2019 or 2022 with C++ build tools."
+        print(msg)
         return False
 
     print(f"✅ Found Visual Studio: {vs_path}")
@@ -75,19 +101,34 @@ def setup_environment():
 
     print(f"✅ Found MSVC compiler: {compiler_dir}")
 
+    # Find Windows SDK
+    sdk_path = find_windows_sdk()
+    if sdk_path:
+        print(f"✅ Found Windows SDK: {sdk_path}")
+    else:
+        print("⚠️  Windows SDK not found, may cause linking issues")
+
     # Set environment variables
     current_path = os.environ.get("PATH", "")
     if compiler_dir not in current_path:
         os.environ["PATH"] = f"{compiler_dir};{current_path}"
-        print(f"✅ Added compiler to PATH")
+        print("✅ Added compiler to PATH")
 
     # Set CUDA architecture for RTX 3060
     os.environ["TORCH_CUDA_ARCH_LIST"] = "8.6"
     print("✅ Set CUDA architecture for RTX 3060")
 
-    # Set additional environment variables
+    # Set additional environment variables for proper linking
     os.environ["DISTUTILS_USE_SDK"] = "1"
     os.environ["MSSdk"] = "1"
+
+    # Set library paths if SDK found
+    if sdk_path:
+        ucrt_path = os.path.join(sdk_path, "ucrt", "x64")
+        um_path = os.path.join(sdk_path, "um", "x64")
+        if os.path.exists(ucrt_path):
+            current_lib = os.environ.get("LIB", "")
+            os.environ["LIB"] = f"{ucrt_path};{um_path};{current_lib}"
 
     return True
 
@@ -141,6 +182,45 @@ def build_extension():
         from torch.utils.cpp_extension import load
 
         print("Compiling CUDA extension...")
+
+        # Get Visual Studio and MSVC paths for proper linking
+        vs_path = find_visual_studio()
+        sdk_path = find_windows_sdk()
+        extra_ldflags = ["/MACHINE:X64"]
+
+        if vs_path:
+            msvc_path = find_msvc_compiler(vs_path)
+            if msvc_path:
+                # Get the MSVC version directory
+                vc_tools_path = os.path.dirname(
+                    os.path.dirname(os.path.dirname(msvc_path))
+                )
+                msvc_lib_path = os.path.join(vc_tools_path, "lib", "x64")
+
+                extra_ldflags.append(f"/LIBPATH:{msvc_lib_path}")
+
+        # Add Windows SDK library paths
+        if sdk_path:
+            ucrt_path = os.path.join(sdk_path, "ucrt", "x64")
+            um_path = os.path.join(sdk_path, "um", "x64")
+            if os.path.exists(ucrt_path):
+                extra_ldflags.append(f"/LIBPATH:{ucrt_path}")
+            if os.path.exists(um_path):
+                extra_ldflags.append(f"/LIBPATH:{um_path}")
+
+        # Add necessary system libraries
+        extra_ldflags.extend(
+            [
+                "msvcrt.lib",
+                "msvcprt.lib",
+                "oldnames.lib",
+                "kernel32.lib",
+                "user32.lib",
+                "ucrt.lib",
+                "/NODEFAULTLIB:libcmt.lib",
+            ]
+        )
+
         squeeze_excitation_cuda = load(
             name="squeeze_excitation_cuda_ext",
             sources=["squeeze_excitation_cuda.cu"],
@@ -148,7 +228,10 @@ def build_extension():
                 "-O3",
                 "--use_fast_math",
                 "-gencode=arch=compute_86,code=sm_86",  # RTX 3060
+                "--compiler-options",
+                "/MD",  # Use dynamic runtime
             ],
+            extra_ldflags=extra_ldflags,
             verbose=True,
         )
 
