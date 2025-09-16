@@ -1,13 +1,167 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from torch.utils.cpp_extension import load
+from torch.autograd import Function
 import os
 
-# Load the CUDA extension
-cuda_module = load(
-    name="fashion_mnist_cnn_cuda", sources=["fashion_mnist_cnn_cuda.cu"], verbose=True
+# PyTorch 2.6.0 compatible CUDA extension loading
+import warnings
+
+# Suppress PyTorch 2.6.0 warnings
+warnings.filterwarnings(
+    "ignore", category=UserWarning, module="torch.utils.cpp_extension"
 )
+
+os.environ["TORCH_CUDA_ARCH_LIST"] = "8.6"  # RTX 3060
+
+try:
+    # Try to import pre-compiled module first
+    import fashion_mnist_cnn_cuda as cuda_module
+
+    print("✓ Using pre-compiled CUDA module")
+except ImportError:
+    # Fallback to JIT compilation with PyTorch 2.6.0 compatibility
+    print("⚠ Pre-compiled module not found, using JIT compilation...")
+    try:
+        cuda_module = load(
+            name="fashion_mnist_cnn_cuda",
+            sources=["fashion_mnist_cnn_cuda.cu"],
+            verbose=False,  # Reduce verbose output
+            extra_cflags=[
+                "-O2",
+                "-std=c++17",
+                "-DWITH_CUDA",
+                "-DTORCH_API_INCLUDE_EXTENSION_H",
+            ],
+            extra_cuda_cflags=[
+                "-O2",
+                "--use_fast_math",
+                "-gencode=arch=compute_86,code=sm_86",
+                "--extended-lambda",
+                "-std=c++17",
+                # PyTorch 2.6.0 compatibility flags
+                "-D__CUDA_NO_HALF_OPERATORS__",
+                "-D__CUDA_NO_HALF_CONVERSIONS__",
+                "-D__CUDA_NO_BFLOAT16_CONVERSIONS__",
+                "-D__CUDA_NO_HALF2_OPERATORS__",
+                "-DTORCH_API_INCLUDE_EXTENSION_H",
+                # Suppress warnings
+                "--diag-suppress",
+                "767",
+                "--diag-suppress",
+                "3326",
+                "--diag-suppress",
+                "3322",
+            ],
+        )
+        print("✓ JIT compilation successful")
+    except Exception as e:
+        print(f"✗ CUDA compilation failed: {e}")
+        print("Falling back to CPU-only implementation...")
+        cuda_module = None
+
+
+# Autograd-compatible CUDA function wrappers
+class Conv2dFunction(Function):
+    @staticmethod
+    def forward(ctx, input, weight, bias, kernel_size):
+        # Save tensors for backward pass
+        ctx.save_for_backward(input, weight, bias)
+        ctx.kernel_size = kernel_size
+
+        if cuda_module is not None:
+            # Use CUDA implementation
+            return cuda_module.conv2d_forward(input, weight, bias, kernel_size)
+        else:
+            # Fallback to PyTorch
+            return F.conv2d(input, weight, bias)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # For now, use PyTorch's autograd for backward pass
+        # This ensures gradients work while you learn CUDA forward passes
+        input, weight, bias = ctx.saved_tensors
+
+        # Use PyTorch's built-in backward computation
+        # In a full CUDA implementation, you'd call your CUDA backward kernels here
+        grad_input = grad_weight = grad_bias = None
+
+        if ctx.needs_input_grad[0]:
+            grad_input = torch.nn.grad.conv2d_input(input.shape, weight, grad_output)
+        if ctx.needs_input_grad[1]:
+            grad_weight = torch.nn.grad.conv2d_weight(input, weight.shape, grad_output)
+        if bias is not None and ctx.needs_input_grad[2]:
+            grad_bias = grad_output.sum((0, 2, 3))
+
+        return grad_input, grad_weight, grad_bias, None
+
+
+class ReLUFunction(Function):
+    @staticmethod
+    def forward(ctx, input):
+        ctx.save_for_backward(input)
+
+        if cuda_module is not None:
+            # Use CUDA implementation
+            return cuda_module.relu_forward(input)
+        else:
+            # Fallback to PyTorch
+            return F.relu(input)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (input,) = ctx.saved_tensors
+
+        if cuda_module is not None:
+            # For learning: you could implement relu_backward in CUDA
+            # For now, use PyTorch's computation
+            grad_input = grad_output * (input > 0).float()
+            return grad_input
+        else:
+            grad_input = grad_output * (input > 0).float()
+            return grad_input
+
+
+class LinearFunction(Function):
+    @staticmethod
+    def forward(ctx, input, weight, bias):
+        ctx.save_for_backward(input, weight, bias)
+
+        if cuda_module is not None:
+            # Use CUDA implementation
+            return cuda_module.linear_forward(input, weight, bias)
+        else:
+            # Fallback to PyTorch
+            return F.linear(input, weight, bias)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, weight, bias = ctx.saved_tensors
+        grad_input = grad_weight = grad_bias = None
+
+        if ctx.needs_input_grad[0]:
+            grad_input = grad_output.mm(weight)
+        if ctx.needs_input_grad[1]:
+            grad_weight = grad_output.t().mm(input)
+        if bias is not None and ctx.needs_input_grad[2]:
+            grad_bias = grad_output.sum(0)
+
+        return grad_input, grad_weight, grad_bias
+
+
+# Convenience functions to call the autograd functions
+def conv2d_cuda(input, weight, bias, kernel_size):
+    return Conv2dFunction.apply(input, weight, bias, kernel_size)
+
+
+def relu_cuda(input):
+    return ReLUFunction.apply(input)
+
+
+def linear_cuda(input, weight, bias):
+    return LinearFunction.apply(input, weight, bias)
 
 
 class Conv2dCUDA(nn.Module):
@@ -17,7 +171,7 @@ class Conv2dCUDA(nn.Module):
         self.out_channels = out_channels
         self.kernel_size = kernel_size
 
-        # Initialize weights using Xavier initialization
+        # Initialize weights and bias as parameters
         self.weight = nn.Parameter(
             torch.randn(out_channels, in_channels, kernel_size, kernel_size)
         )
@@ -28,8 +182,14 @@ class Conv2dCUDA(nn.Module):
         else:
             self.register_parameter("bias", None)
 
+        if cuda_module is None:
+            print(
+                f"⚠ Using PyTorch fallback for Conv2d({in_channels}, {out_channels}, {kernel_size})"
+            )
+
     def forward(self, x):
-        return cuda_module.conv2d_forward(x, self.weight, self.bias, self.kernel_size)
+        # Use CUDA implementation with autograd support!
+        return conv2d_cuda(x, self.weight, self.bias, self.kernel_size)
 
 
 class MaxPool2dCUDA(nn.Module):
@@ -38,19 +198,35 @@ class MaxPool2dCUDA(nn.Module):
         self.kernel_size = kernel_size
         self.stride = stride if stride is not None else kernel_size
 
+        # Fallback to PyTorch implementation
+        self.pytorch_maxpool = nn.MaxPool2d(kernel_size, stride)
+        if cuda_module is None:
+            print(f"⚠ Using PyTorch fallback for MaxPool2d({kernel_size})")
+
     def forward(self, x):
-        output, indices = cuda_module.maxpool2d_forward(
-            x, self.kernel_size, self.stride
-        )
-        return output
+        if cuda_module is not None:
+            try:
+                output, indices = cuda_module.maxpool2d_forward(
+                    x, self.kernel_size, self.stride
+                )
+                return output
+            except Exception as e:
+                print(f"⚠ CUDA maxpool2d failed: {e}, using PyTorch fallback")
+                return self.pytorch_maxpool(x)
+        else:
+            return self.pytorch_maxpool(x)
 
 
 class ReLUCUDA(nn.Module):
     def __init__(self):
         super(ReLUCUDA, self).__init__()
 
+        if cuda_module is None:
+            print("⚠ Using PyTorch fallback for ReLU")
+
     def forward(self, x):
-        return cuda_module.relu_forward(x)
+        # Use CUDA implementation with autograd support!
+        return relu_cuda(x)
 
 
 class LinearCUDA(nn.Module):
@@ -59,7 +235,7 @@ class LinearCUDA(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
 
-        # Initialize weights using Xavier initialization
+        # Initialize weights and bias as parameters
         self.weight = nn.Parameter(torch.randn(out_features, in_features))
         nn.init.xavier_uniform_(self.weight)
 
@@ -68,11 +244,16 @@ class LinearCUDA(nn.Module):
         else:
             self.register_parameter("bias", None)
 
+        if cuda_module is None:
+            print(f"⚠ Using PyTorch fallback for Linear({in_features}, {out_features})")
+
     def forward(self, x):
         # Reshape input if needed (for flattening after conv layers)
         if x.dim() > 2:
             x = x.view(x.size(0), -1)
-        return cuda_module.linear_forward(x, self.weight, self.bias)
+
+        # Use CUDA implementation with autograd support!
+        return linear_cuda(x, self.weight, self.bias)
 
 
 class FlattenCUDA(nn.Module):
@@ -86,23 +267,47 @@ class FlattenCUDA(nn.Module):
 class CrossEntropyLossCUDA(nn.Module):
     def __init__(self):
         super(CrossEntropyLossCUDA, self).__init__()
+        # Fallback to PyTorch implementation to ensure autograd compatibility
+        self.pytorch_ce = nn.CrossEntropyLoss()
+        if cuda_module is None:
+            print("⚠ Using PyTorch fallback for CrossEntropyLoss")
 
     def forward(self, logits, targets):
-        # Convert targets to int if needed
-        if targets.dtype != torch.int32:
-            targets = targets.to(torch.int32)
+        # Convert targets to long if needed (CrossEntropyLoss expects LongTensor)
+        if targets.dtype != torch.long:
+            targets = targets.to(torch.long)
 
-        losses = cuda_module.cross_entropy_forward(logits, targets)
-        return losses.mean()
+        if cuda_module is not None:
+            try:
+                # For now, use PyTorch's CrossEntropyLoss to ensure autograd compatibility
+                # CUDA implementation can be added later with proper autograd integration
+                return self.pytorch_ce(logits, targets)
+            except Exception as e:
+                print(f"⚠ CUDA cross_entropy failed: {e}, using PyTorch fallback")
+                return self.pytorch_ce(logits, targets)
+        else:
+            return self.pytorch_ce(logits, targets)
 
 
 class SoftmaxCUDA(nn.Module):
     def __init__(self, dim=-1):
         super(SoftmaxCUDA, self).__init__()
         self.dim = dim
+        # Fallback to PyTorch implementation
+        self.pytorch_softmax = nn.Softmax(dim=dim)
+        if cuda_module is None:
+            print("⚠ Using PyTorch fallback for Softmax")
 
     def forward(self, x):
-        return cuda_module.softmax_forward(x)
+        if cuda_module is not None:
+            try:
+                # For now, use PyTorch's Softmax to ensure autograd compatibility
+                return self.pytorch_softmax(x)
+            except Exception as e:
+                print(f"⚠ CUDA softmax failed: {e}, using PyTorch fallback")
+                return self.pytorch_softmax(x)
+        else:
+            return self.pytorch_softmax(x)
 
 
 class FashionMNISTCNN(nn.Module):

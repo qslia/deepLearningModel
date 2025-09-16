@@ -3,14 +3,29 @@
 #include <cuda_runtime.h>
 #include <vector>
 #include <cmath>
-#include <iostream>
 
-// CUDA kernel for 2D convolution forward pass
+// PyTorch 2.6.0 compatibility fixes
+#define TORCH_CHECK_ARG(cond, arg, msg) TORCH_CHECK(cond, msg)
+#define TORCH_CHECK_TYPE(tensor, type) TORCH_CHECK(tensor.scalar_type() == type, "Expected " #type " tensor")
+
+// Disable problematic half precision operations for PyTorch 2.6.0
+#define __CUDA_NO_HALF_OPERATORS__
+#define __CUDA_NO_HALF_CONVERSIONS__ 
+#define __CUDA_NO_BFLOAT16_CONVERSIONS__
+#define __CUDA_NO_HALF2_OPERATORS__
+
+// Simple CUDA kernel loop macro
+#define CUDA_KERNEL_LOOP(i, n) \
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; \
+       i < (n); \
+       i += blockDim.x * gridDim.x)
+
+// Simplified CUDA kernel for 2D convolution forward pass (PyTorch 2.6.0 compatible)
 __global__ void conv2d_forward_kernel(
-    const float* input,
-    const float* weight,
-    const float* bias,
-    float* output,
+    const float* __restrict__ input,
+    const float* __restrict__ weight,
+    const float* __restrict__ bias,
+    float* __restrict__ output,
     int batch_size,
     int in_channels,
     int out_channels,
@@ -20,14 +35,11 @@ __global__ void conv2d_forward_kernel(
     int output_height,
     int output_width) {
     
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_output_elements = batch_size * out_channels * output_height * output_width;
-    
-    if (idx < total_output_elements) {
-        int w = idx % output_width;
-        int h = (idx / output_width) % output_height;
-        int oc = (idx / (output_width * output_height)) % out_channels;
-        int b = idx / (out_channels * output_height * output_width);
+    CUDA_KERNEL_LOOP(idx, batch_size * out_channels * output_height * output_width) {
+        const int w = idx % output_width;
+        const int h = (idx / output_width) % output_height;
+        const int oc = (idx / (output_width * output_height)) % out_channels;
+        const int b = idx / (out_channels * output_height * output_width);
         
         float sum = 0.0f;
         
@@ -35,16 +47,16 @@ __global__ void conv2d_forward_kernel(
         for (int ic = 0; ic < in_channels; ic++) {
             for (int kh = 0; kh < kernel_size; kh++) {
                 for (int kw = 0; kw < kernel_size; kw++) {
-                    int input_h = h + kh;
-                    int input_w = w + kw;
+                    const int input_h = h + kh;
+                    const int input_w = w + kw;
                     
                     if (input_h < input_height && input_w < input_width) {
-                        int input_idx = b * in_channels * input_height * input_width +
-                                       ic * input_height * input_width +
-                                       input_h * input_width + input_w;
-                        int weight_idx = oc * in_channels * kernel_size * kernel_size +
-                                        ic * kernel_size * kernel_size +
-                                        kh * kernel_size + kw;
+                        const int input_idx = b * in_channels * input_height * input_width +
+                                             ic * input_height * input_width +
+                                             input_h * input_width + input_w;
+                        const int weight_idx = oc * in_channels * kernel_size * kernel_size +
+                                              ic * kernel_size * kernel_size +
+                                              kh * kernel_size + kw;
                         sum += input[input_idx] * weight[weight_idx];
                     }
                 }
@@ -52,8 +64,7 @@ __global__ void conv2d_forward_kernel(
         }
         
         // Add bias
-        sum += bias[oc];
-        output[idx] = sum;
+        output[idx] = sum + bias[oc];
     }
 }
 
