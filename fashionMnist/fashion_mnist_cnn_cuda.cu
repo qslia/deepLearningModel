@@ -1,18 +1,37 @@
-#include <torch/extension.h>
+// CUDA 12.6 + PyTorch 2.6.0 compatibility fixes
+// Must be defined BEFORE any CUDA or PyTorch includes
+#ifndef __CUDA_NO_HALF_OPERATORS__
+#define __CUDA_NO_HALF_OPERATORS__
+#endif
+#ifndef __CUDA_NO_HALF_CONVERSIONS__
+#define __CUDA_NO_HALF_CONVERSIONS__ 
+#endif
+#ifndef __CUDA_NO_BFLOAT16_CONVERSIONS__
+#define __CUDA_NO_BFLOAT16_CONVERSIONS__
+#endif
+#ifndef __CUDA_NO_HALF2_OPERATORS__
+#define __CUDA_NO_HALF2_OPERATORS__
+#endif
+
+// Disable problematic CUDA features for compatibility
+#define __CUDA_NO_HALF_CONVERSIONS__
+#define __CUDA_NO_BFLOAT16_CONVERSIONS__
+
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <vector>
 #include <cmath>
 
-// PyTorch 2.6.0 compatibility fixes
-#define TORCH_CHECK_ARG(cond, arg, msg) TORCH_CHECK(cond, msg)
-#define TORCH_CHECK_TYPE(tensor, type) TORCH_CHECK(tensor.scalar_type() == type, "Expected " #type " tensor")
+// Include PyTorch headers AFTER CUDA compatibility defines
+#include <torch/extension.h>
 
-// Disable problematic half precision operations for PyTorch 2.6.0
-#define __CUDA_NO_HALF_OPERATORS__
-#define __CUDA_NO_HALF_CONVERSIONS__ 
-#define __CUDA_NO_BFLOAT16_CONVERSIONS__
-#define __CUDA_NO_HALF2_OPERATORS__
+// Additional PyTorch 2.6.0 compatibility
+#ifndef TORCH_CHECK_ARG
+#define TORCH_CHECK_ARG(cond, arg, msg) TORCH_CHECK(cond, msg)
+#endif
+#ifndef TORCH_CHECK_TYPE  
+#define TORCH_CHECK_TYPE(tensor, type) TORCH_CHECK(tensor.scalar_type() == type, "Expected " #type " tensor")
+#endif
 
 // Simple CUDA kernel loop macro
 #define CUDA_KERNEL_LOOP(i, n) \
