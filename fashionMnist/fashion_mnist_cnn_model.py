@@ -22,63 +22,13 @@ try:
 
     print("✓ Using pre-compiled CUDA module")
 except ImportError:
-    # Fallback to JIT compilation with PyTorch 2.6.0 compatibility
-    print("⚠ Pre-compiled module not found, using JIT compilation...")
-    try:
-        cuda_module = load(
-            name="fashion_mnist_cnn_cuda",
-            sources=["fashion_mnist_cnn_cuda.cu"],
-            verbose=False,  # Reduce verbose output
-            extra_cflags=[
-                "-O2",
-                "-std=c++17",
-                "-DWITH_CUDA",
-                "-DTORCH_API_INCLUDE_EXTENSION_H",
-                # CUDA 12.6 + PyTorch 2.6.0 compatibility
-                "-D__CUDA_NO_HALF_OPERATORS__",
-                "-D__CUDA_NO_HALF_CONVERSIONS__",
-                "-D__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                "-D__CUDA_NO_HALF2_OPERATORS__",
-            ],
-            extra_cuda_cflags=[
-                "-O2",
-                "--use_fast_math",
-                "-gencode=arch=compute_86,code=sm_86",
-                "--extended-lambda",
-                "--expt-relaxed-constexpr",
-                "--expt-extended-lambda",
-                "-std=c++17",
-                # Critical CUDA 12.6 + PyTorch 2.6.0 compatibility
-                "-D__CUDA_NO_HALF_OPERATORS__",
-                "-D__CUDA_NO_HALF_CONVERSIONS__",
-                "-D__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                "-D__CUDA_NO_HALF2_OPERATORS__",
-                "-DTORCH_API_INCLUDE_EXTENSION_H",
-                "-DTORCH_EXTENSION_NAME=fashion_mnist_cnn_cuda",
-                # Disable problematic CUDA features
-                "-DCUDA_HAS_FP16=0",
-                "-DCUDA_HAS_BF16=0",
-                # Windows MSVC compatibility
-                "-Xcompiler",
-                "/wd4819,/wd4244,/wd4267,/wd4996,/wd4275,/wd4251,/EHsc",
-                # Suppress CUDA compiler warnings
-                "--diag-suppress",
-                "767",  # pointer conversion
-                "--diag-suppress",
-                "3326",  # operator new
-                "--diag-suppress",
-                "3322",  # operator new
-                "--diag-suppress",
-                "20012",  # host device warnings
-                "--diag-suppress",
-                "20014",  # host device warnings
-            ],
-        )
-        print("✓ JIT compilation successful")
-    except Exception as e:
-        print(f"✗ CUDA compilation failed: {e}")
-        print("Falling back to CPU-only implementation...")
-        cuda_module = None
+    print("✗ Manually compiled CUDA module not found!")
+    print("Please run manual compilation first:")
+    print("  PowerShell: .\\manual_compile.ps1")
+    print("  Batch:      manual_compile.bat")
+    print("  Python:     python setup_fashion_mnist_cuda.py build_ext --inplace")
+    print("Falling back to CPU-only implementation...")
+    cuda_module = None
 
 
 # Autograd-compatible CUDA function wrappers
