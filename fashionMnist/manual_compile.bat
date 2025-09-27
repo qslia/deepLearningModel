@@ -41,6 +41,7 @@ where nvcc.exe
 echo.
 echo 5. Starting manual compilation...
 echo This may take several minutes...
+set PYTHONUTF8=1
 python setup_fashion_mnist_cuda.py build_ext --inplace --verbose
 
 if errorlevel 1 (
